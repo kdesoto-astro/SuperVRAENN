@@ -9,7 +9,7 @@ import os
 
 now = datetime.datetime.now()
 date = str(now.strftime("%Y-%m-%d"))
-
+NFILTS = 2
 
 def str2bool(v):
     """
@@ -65,7 +65,7 @@ def read_in_LC_files(input_files, obj_names, style='SNANA'):
     return LC_list
 
 
-def feat_from_raenn(data_file, model_base=None,
+def feat_from_raenn(data_file, variational=False, model_base=None,
                     prep_file=None, plot=False):
     """
     Calculate RAENN features
@@ -94,12 +94,17 @@ def feat_from_raenn(data_file, model_base=None,
     with open(model_file, 'r') as f:
         model = model_from_json(f.read())
     model.load_weights(model_weight_file)
-
-    encodingN = model.layers[2].output_shape[1]
+    
+    if variational:
+        encodingN = model.layers[3].output_shape[-1]
+        encoded = model.layers[3]
+    else:
+        encodingN = model.layers[2].output_shape[-1]
+        encoded = model.layers[2]
+    print(encodingN)
     original_input = Input(shape=(None, nfilts*2+1))
-    encoded = model.layers[2]
     encoded1 = model.layers[1]
-    encoder = Model(input=original_input, output=encoded(encoded1(original_input)))
+    encoder = Model(original_input, encoded(encoded1(original_input)))
 
     if plot:
         decoder = get_decoder(model, encodingN)
@@ -112,6 +117,7 @@ def feat_from_raenn(data_file, model_base=None,
     for i in np.arange(len(ids)):
         inseq = np.reshape(sequence[i, :, :], (1, maxlen, nfilts*2+1))
         my_encoding = encoder.predict(inseq)
+        print(my_encoding.shape)
         encodings[i, :] = my_encoding
         encoder.reset_states()
     return encodings
@@ -140,24 +146,21 @@ def feat_peaks(input_lcs):
     return peaks
 
 
-def feat_rise_and_decline(input_lcs, n_mag, nfilts=4):
+def feat_rise_and_decline(max_inds_all, preds_all, n_mag, nfilts=4):
 
     t_falls_all = []
     t_rises_all = []
-
-    for i, input_lc in enumerate(input_lcs):
-        gp = input_lc.gp
-        gp_mags = input_lc.gp_mags
+    new_times = np.linspace(-100, 100, 500)
+    for i, max_inds in enumerate(max_inds_all):
         t_falls = []
         t_rises = []
+        preds = preds_all[i]
         for j in np.arange(nfilts):
-            new_times = np.linspace(-100, 100, 500)
-            x_stacked = np.asarray([new_times, [j] * 500]).T
-            pred, var = gp.predict(gp_mags, x_stacked)
-
-            max_ind = np.nanargmin(pred)
+            max_ind = max_inds[j]
+            pred = preds[j]
             max_mag = pred[max_ind]
             max_t = new_times[max_ind]
+           
             trise = np.where((new_times < max_t) & (pred > (max_mag + n_mag)))
             tfall = np.where((new_times > max_t) & (pred > (max_mag + n_mag)))
             if len(trise[0]) == 0:
@@ -176,17 +179,16 @@ def feat_rise_and_decline(input_lcs, n_mag, nfilts=4):
     return t_rises_all, t_falls_all
 
 
-def feat_slope(input_lcs, t_min_lim=10, t_max_lim=30, nfilts=4):
+def feat_slope(max_inds_all, preds_all, t_min_lim=10, t_max_lim=30, nfilts=4):
     slopes_all = []
-    for i, input_lc in enumerate(input_lcs):
-        gp = input_lc.gp
-        gp_mags = input_lc.gp_mags
+    for i in range(len(max_inds_all)):
+        max_inds = max_inds_all[i]
+        preds = preds_all[i]
         slopes = []
         for j in np.arange(nfilts):
+            pred = preds[j]
+            max_ind = max_inds[j]
             new_times = np.linspace(-100, 100, 500)
-            x_stacked = np.asarray([new_times, [j] * 500]).T
-            pred, var = gp.predict(gp_mags, x_stacked)
-            max_ind = np.nanargmin(pred)
             max_t = new_times[max_ind]
             new_times = new_times - max_t
             lc_grad = np.gradient(pred, new_times)
@@ -196,16 +198,12 @@ def feat_slope(input_lcs, t_min_lim=10, t_max_lim=30, nfilts=4):
     return slopes_all
 
 
-def feat_int(input_lcs, nfilts=4):
+def feat_int(preds_all, nfilts=4):
     ints_all = []
-    for i, input_lc in enumerate(input_lcs):
-        gp = input_lc.gp
-        gp_mags = input_lc.gp_mags
+    for preds in preds_all:
         ints = []
         for j in np.arange(nfilts):
-            new_times = np.linspace(-100, 100, 500)
-            x_stacked = np.asarray([new_times, [j] * 500]).T
-            pred, var = gp.predict(gp_mags, x_stacked)
+            pred = preds[j]
             ints.append(np.trapz(pred))
 
         ints_all.append(ints)
@@ -230,6 +228,7 @@ def main():
     parser.add_argument('--plot', type=str2bool, default=False, help='Plot LCs, for testing')
     parser.add_argument('--model-base', type=str, dest='model_base', default='./products/models/model', help='...')
     parser.add_argument('--get-feat-raenn', type=str2bool, dest='get_feat_raenn', default=True, help='...')
+    parser.add_argument('--variational', type=str2bool, dest='variational', default=False, help='...')
     parser.add_argument('--get-feat-peaks', type=str2bool, dest='get_feat_peaks', default=True, help='...')
     parser.add_argument('--get-feat-rise-decline-1', type=str2bool,
                         dest='get_feat_rise_decline1', default=True,
@@ -247,14 +246,33 @@ def main():
 
     args = parser.parse_args()
     features = []
-
-    input_lcs = np.load(args.lcfile, allow_pickle=True)['lcs']
     ids = []
     feat_names = []
-    for input_lc in input_lcs:
+    max_inds_all = []
+    preds_all = []
+    
+    input_lcs = np.load(args.lcfile, allow_pickle=True)['lcs']
+    for i, input_lc in enumerate(input_lcs):
         ids.append(input_lc.name)
+        gp = input_lc.gp
+        gp_mags = input_lc.gp_mags
+        t_falls = []
+        t_rises = []
+        max_inds = []
+        preds = []
+        for j in np.arange(NFILTS):
+            new_times = np.linspace(-100, 100, 500)
+            x_stacked = np.asarray([new_times, [j] * 500]).T
+            pred, var = gp.predict(gp_mags, x_stacked)
+
+            max_ind = np.nanargmin(pred)
+            preds.append(pred)
+            max_inds.append(max_ind)
+        preds_all.append(preds)
+        max_inds_all.append(max_inds)
+
     if args.get_feat_raenn:
-        feat = feat_from_raenn(args.lcfile, model_base=args.model_base,
+        feat = feat_from_raenn(args.lcfile, variational=args.variational, model_base=args.model_base,
                                prep_file=args.prep_file, plot=args.plot)
         if features != []:
             features = np.hstack((features, feat))
@@ -275,7 +293,7 @@ def main():
         print('peak feat done')
 
     if args.get_feat_rise_decline1:
-        feat1, feat2 = feat_rise_and_decline(input_lcs, 1)
+        feat1, feat2 = feat_rise_and_decline(max_inds_all, preds_all, 1, nfilts=NFILTS)
         if features != []:
             features = np.hstack((features, feat1))
             features = np.hstack((features, feat2))
@@ -288,7 +306,7 @@ def main():
         print('dur1 feat done')
 
     if args.get_feat_rise_decline2:
-        feat1, feat2 = feat_rise_and_decline(input_lcs, 2)
+        feat1, feat2 = feat_rise_and_decline(max_inds_all, preds_all, 2, nfilts=NFILTS)
         if features != []:
             features = np.hstack((features, feat1))
             features = np.hstack((features, feat2))
@@ -301,7 +319,7 @@ def main():
         print('dur2 feat done')
 
     if args.get_feat_rise_decline3:
-        feat1, feat2 = feat_rise_and_decline(input_lcs, 3)
+        feat1, feat2 = feat_rise_and_decline(max_inds_all, preds_all, 3, nfilts=NFILTS)
         if features != []:
             features = np.hstack((features, feat1))
             features = np.hstack((features, feat2))
@@ -314,7 +332,7 @@ def main():
         print('dur3 feat done')
 
     if args.get_feat_slope:
-        feat = feat_slope(input_lcs)
+        feat = feat_slope(max_inds_all, preds_all, nfilts=NFILTS)
         if features != []:
             features = np.hstack((features, feat))
         else:
@@ -324,7 +342,7 @@ def main():
         print('slope feat done')
 
     if args.get_feat_int:
-        feat = feat_int(input_lcs)
+        feat = feat_int(preds_all, nfilts=NFILTS)
         if features != []:
             features = np.hstack((features, feat))
         else:

@@ -2,7 +2,7 @@ import datetime
 from argparse import ArgumentParser
 import numpy as np
 from sklearn import preprocessing
-from sklearn.model_selection import LeaveOneOut
+from sklearn.model_selection import LeaveOneOut, StratifiedKFold
 from sklearn.neighbors import KernelDensity
 from sklearn.ensemble import RandomForestClassifier
 import matplotlib.pyplot as plt
@@ -15,7 +15,7 @@ from astropy.io import ascii
 
 now = datetime.datetime.now()
 date = str(now.strftime("%Y-%m-%d"))
-
+N_FOLDS = 5
 
 def Gauss_resample(x, y, N):
     """
@@ -44,13 +44,17 @@ def Gauss_resample(x, y, N):
     newy = np.zeros((int(N*len(uys)), ))
     for i, uy in enumerate(uys):
         gind = np.where(y == uy)
-        newX[i*N:i*N+len(gind[0]), :] = x[gind[0], :]
-        newy[i*N:(i+1) * N] = uy
-        cx = x[gind[0], :]
-        mean = np.mean(cx, axis=0)
-        cov = np.cov(cx, rowvar=False)
-        newX[i * N + len(gind[0]):(i + 1) * N] = \
-            np.random.multivariate_normal(mean, cov / 2., size=N - len(gind[0]))
+        if len(gind[0]) > N: # if we already have >N samples of one type
+            newX[i * N:(i + 1) * N, :] = x[gind[0][:N], :]
+            newy[i * N:(i + 1) * N] = uy
+        else:
+            newX[i*N:i*N+len(gind[0]), :] = x[gind[0], :]
+            newy[i*N:(i+1) * N] = uy
+            cx = x[gind[0], :]
+            mean = np.mean(cx, axis=0)
+            cov = np.cov(cx, rowvar=False)
+            newX[i * N + len(gind[0]):(i + 1) * N] = \
+                np.random.multivariate_normal(mean, cov / 2., size=N - len(gind[0]))
     return newX, newy
 
 
@@ -79,11 +83,15 @@ def KDE_resample(x, y, N, bandwidth=0.5):
     newy = np.zeros((int(N*len(uys)), ))
     for i, uy in enumerate(uys):
         gind = np.where(y == uy)
-        newX[i * N:i * N + len(gind[0]), :] = x[gind[0], :]
-        newy[i * N:(i + 1) * N] = uy
-        cx = x[gind[0], :]
-        kde = KernelDensity(kernel='gaussian', bandwidth=bandwidth).fit(cx)
-        newX[i * N + len(gind[0]):(i + 1) * N] = kde.sample(n_samples=N - len(gind[0]))
+        if len(gind[0]) > N: # if we already have >N samples of one type
+            newX[i * N:(i + 1) * N, :] = x[gind[0][:N], :]
+            newy[i * N:(i + 1) * N] = uy
+        else:
+            newX[i * N:i * N + len(gind[0]), :] = x[gind[0], :]
+            newy[i * N:(i + 1) * N] = uy
+            cx = x[gind[0], :]
+            kde = KernelDensity(kernel='gaussian', bandwidth=bandwidth).fit(cx)
+            newX[i * N + len(gind[0]):(i + 1) * N] = kde.sample(n_samples=N - len(gind[0]))
     return newX, newy
 
 
@@ -121,6 +129,8 @@ def prep_data_for_classifying(featurefile, means, stds, whiten=True, verbose=Fal
     ids = feat_data['ids']
     features = feat_data['features']
     feat_names = feat_data['feat_names']
+    
+    print(feat_names)
 
     X = []
     final_sn_names = []
@@ -180,6 +190,7 @@ def prep_data_for_training(featurefile, metatable, whiten=True):
     ids = feat_data['ids']
     features = feat_data['features']
     feat_names = feat_data['feat_names']
+    print(feat_names, len(feat_names))
     metadata = np.loadtxt(metatable, dtype=str, usecols=(0, 2))
     sn_dict = {'SLSN': 0, 'SNII': 1, 'SNIIn': 2, 'SNIa': 3, 'SNIbc': 4}
 
@@ -189,6 +200,8 @@ def prep_data_for_training(featurefile, metatable, whiten=True):
     for sn_name, sn_type in metadata:
         gind = np.where(sn_name == ids)
         if 'SN' not in sn_type:
+            continue
+        elif sn_type not in sn_dict:
             continue
         else:
             sn_num = sn_dict[sn_type]
@@ -210,6 +223,8 @@ def prep_data_for_training(featurefile, metatable, whiten=True):
     stds = np.std(X, axis=0)
     if whiten:
         X = preprocessing.scale(X)
+        
+    print(X.shape, y.shape, len(final_sn_names))
 
     return X, y, final_sn_names, means, stds, feat_names
 
@@ -264,13 +279,13 @@ def main():
             feature_names = np.append(feature_names, 'random')
 
         if not args.savemodel:
-            loo = LeaveOneOut()
+            #loo = LeaveOneOut()
+            skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True)
             y_pred = np.zeros(len(y))
-            for train_index, test_index in loo.split(X):
-
+            for i, (train_index, test_index) in enumerate(skf.split(X, y)):
                 X_train, X_test = X[train_index], X[test_index]
                 y_train, y_test = y[train_index], y[test_index]
-
+                #print(X_train.shape, y_train.shape)
                 if args.resampling == 'Gauss':
                     X_res, y_res = Gauss_resample(X_train, y_train, 500)
                 else:
@@ -301,11 +316,13 @@ def main():
                                              max_features=None,
                                              oob_score=False)
                 clf.fit(X_res, y_res)
-                print(clf.predict_proba(X_test), y_test, names[test_index])
+                print(X_res.shape)
 
+                probs = clf.predict_proba(X_test)
                 if args.calc_importance:
                     feature_names = np.asarray(feature_names, dtype=str)
                     importances = clf.feature_importances_
+                    print(len(feature_names), len(importances))
                     indices = importances.argsort()[::-1]
 
                     print("Feature ranking:")
@@ -320,9 +337,34 @@ def main():
                                rotation=45, ha='right')
                     plt.show()
                 y_pred[test_index] = np.argmax(clf.predict_proba(X_test))
+                
+                if i == 0:
+                    names_table = np.array(names[test_index])
+                    probs_table = np.array(probs)
+                else:
+                    names_table = np.append(names_table, names[test_index])
+                    probs_table = np.vstack((probs_table, probs))
+                print(names_table.shape, probs_table.shape)
+                    
+            
             cnf_matrix = confusion_matrix(y, y_pred)
+            print(np.unique(y), np.unique(y_pred))
             print(cnf_matrix)
+            
+            probability_table = QTable(np.vstack((names_table, probs_table.T)).T,
+                               names=['Event Name', *sn_dict],
+                               meta={'name': 'SuperRAENN probabilities'})
+            # save the model to disk
+            if not os.path.exists(args.outdir):
+                os.makedirs(args.outdir)
+            if args.outdir[-1] != '/':
+                args.outdir += '/'
+            ascii.write(probability_table, args.outdir+args.outfile+'_'+str(N_FOLDS)+'.tex',
+                        format='latex', overwrite=True)
+                
+            
         if args.savemodel:
+            print(X.shape, y.shape)
             if args.resampling == 'Gauss':
                 X_res, y_res = Gauss_resample(X, y, 500)
             else:
