@@ -8,7 +8,7 @@ from keras.optimizers import Adam
 import numpy as np
 import matplotlib.pyplot as plt
 import keras.backend as K
-from keras.callbacks import EarlyStopping
+from keras.callbacks import EarlyStopping, Callback
 import datetime
 import os
 import logging
@@ -16,6 +16,7 @@ from keras.losses import mse
 import tensorflow as tf
 import sys
 import pickle
+import math
 tf.compat.v1.disable_eager_execution()
 
 now = datetime.datetime.now()
@@ -26,7 +27,41 @@ ENCODING_N_DEFAULT = 10
 N_EPOCH_DEFAULT = 1000
 nfilts = 2
 
-def customLoss(yTrue, yPred):
+class AnnealingCallback(tf.keras.callbacks.Callback):
+    """
+    Copied over from https://github.com/larngroup/KL_divergence_loss/blob/main/annealing_helper_objects.py.
+    """
+    def __init__(self,beta,name,total_epochs,M=4,R=0.5):
+        assert R >= 0. and R <= 1.
+        self.beta=beta
+        self.name=name
+        self.total_epochs=total_epochs
+        self.M = M
+        self.R = R
+    
+    def on_epoch_begin(self,epoch,logs={}):
+      
+        if self.name=="normal":
+            pass
+        elif self.name=="monotonic":
+            
+            new_value=epoch/float(self.total_epochs)
+            if new_value > 1:
+                new_value = 1
+            tf.keras.backend.set_value(self.beta,new_value)
+            print("\n Current beta: "+str(tf.keras.backend.get_value(self.beta)))
+            
+        elif self.name=="cyclical":
+            T=self.total_epochs
+            tau = epoch % math.ceil(T/self.M) / (T/self.M)
+            if tau <= self.R:
+                new_value = tau / self.R
+            else:
+                new_value = 1.
+            tf.keras.backend.set_value(self.beta,new_value)
+            print("\n Current beta: "+str(tf.keras.backend.get_value(self.beta)))
+            
+def reconstruction_loss(yTrue, yPred):
     """
     Custom loss which doesn't use the errors
 
@@ -37,13 +72,29 @@ def customLoss(yTrue, yPred):
     yPred : array
         Predicted flux values
     """
-    #return K.mean(K.square(yTrue[:, :, 1:5] - yPred[:, :, :]))
     global nfilts
-    loss = K.mean(K.square(yTrue[:, :, 1:(1+nfilts)] - yPred[:, :, :])/K.square(yTrue[:,:,(1+nfilts):]))
-    tf.print("\n y_true:", yTrue, output_stream=sys.stdout)
+    loss = K.mean(K.square(yTrue[:, :, 1:(1+nfilts)] - yPred[:, :, :]))
     return loss
 
-def vae_loss(encoded_mean, encoded_log_sigma):
+def kl_loss_wrapper(kl_loss_val):
+    """
+    Function wrapper that simply returns the KL divergence.
+    """
+    def kl_loss(yTrue,yPred):   
+        return kl_loss_val
+    
+    return kl_loss
+
+def beta_wrapper(beta):
+    """
+    Function wrapper that simply returns the KL divergence.
+    """
+    def annealing_beta(yTrue,yPred):   
+        return beta
+    
+    return annealing_beta
+    
+def vae_loss_wrapper(kl_loss, beta):
     """
     Loss associated with a variational auto-encoder. Includes the
     traditional AE loss term and an additional KL divergence which
@@ -53,8 +104,8 @@ def vae_loss(encoded_mean, encoded_log_sigma):
     ----------
     encoded_mean : array
         Mean of the latent distribution
-    encoded_log_sigma : array
-        Log of the standard deviation of the (Gaussian) latent distribution
+    encoded_log_var : array
+        Log of the variance of the (Gaussian) latent distribution
         
     Returns
     ----------
@@ -63,15 +114,15 @@ def vae_loss(encoded_mean, encoded_log_sigma):
     """
     global nfilts
 
-    kl_loss = - 0.5 * K.mean(1 + encoded_log_sigma - K.square(encoded_mean) - K.exp(encoded_log_sigma), axis=-1)
+    #kl_loss = - 0.5 * K.mean(1 + encoded_log_sigma - K.square(encoded_mean) - K.exp(encoded_log_sigma), axis=-1)
 
-    def lossFunction(yTrue,yPred):   
-        #reconstruction_loss = K.mean(K.square(yTrue[:, :, 1:(1+nfilts)] - yPred[:, :, :])/K.square(yTrue[:,:,(1+nfilts):]))
-        reconstruction_loss = K.log(K.mean(K.square(yTrue[:, :, 1:(1+nfilts)] - yPred[:, :, :])))
+    def vae_loss(yTrue,yPred):   
+        # p(reconstruction) = (1/sigma/sqrt(2pi)) * e^-(x-hat)^2/sigma^2
+        # NLL = -log(1/sigma/sqrt(2pi)) + (x-hat)^2/sigma^2
+        # can drop the constant terms, assume sigma=1 for now
+        return reconstruction_loss(yTrue, yPred) + beta * kl_loss
 
-        return reconstruction_loss + kl_loss
-
-    return lossFunction
+    return vae_loss
 
 def prep_input(input_lc_file, new_t_max=100.0, filler_err=1.0,
                save=False, load=False, outdir=None, prep_file=None):
@@ -175,15 +226,15 @@ def sampling(samp_args):
     sample : array
         a sampled value from the latent space
     """
-    z_mean, z_log_sigma = samp_args
+    z_mean, z_log_var = samp_args
 
     batch = K.shape(z_mean)[0]
     dim = K.int_shape(z_mean)[1]
     # by default, random_normal has mean = 0 and std = 1.0
     epsilon = K.random_normal(shape=(batch, dim))
-    return z_mean + K.exp(0.5 * z_log_sigma) * epsilon
+    return z_mean + K.exp(0.5 * z_log_var) * epsilon
 
-def make_model(LSTMN, encodingN, maxlen, nfilts, variational=False):
+def make_model(LSTMN, encodingN, maxlen, nfilts, n_epochs, variational=False):
     """
     Make RAENN model
 
@@ -223,9 +274,9 @@ def make_model(LSTMN, encodingN, maxlen, nfilts, variational=False):
     
     if variational:
         encoded_mean = GRU(encodingN, return_sequences=False, activation='linear')(encoder2)
-        encoded_log_sigma = GRU(encodingN, return_sequences=False, activation='linear')(encoder2)
-        print(encoded_log_sigma)
-        z = Lambda(sampling, output_shape=(encodingN,))([encoded_mean, encoded_log_sigma])
+        encoded_log_var = GRU(encodingN, return_sequences=False, activation='linear')(encoder2)
+        print(encoded_log_var)
+        z = Lambda(sampling, output_shape=(encodingN,))([encoded_mean, encoded_log_var])
     else:
         z = GRU(encodingN, return_sequences=False, activation='tanh',
                       recurrent_activation='hard_sigmoid')(encoder2)
@@ -239,22 +290,33 @@ def make_model(LSTMN, encodingN, maxlen, nfilts, variational=False):
                                input_shape=(None, 1))(decoder2)
 
     model = Model([input_1, input_2], decoder3)
+   
 
-    new_optimizer = Adam(lr=1e-4, beta_1=0.9, beta_2=0.999,
+    new_optimizer = Adam(learning_rate=1e-4, beta_1=0.9, beta_2=0.999,
                          decay=0) # TODO: have this adjustable params, config file?
     
     es = EarlyStopping(monitor='val_loss', min_delta=0, patience=50,
                        verbose=0, mode='min', baseline=None,
                        restore_best_weights=True)
 
+    
+
     callbacks_list = [es]
-    
+
     if variational:
-        model.compile(optimizer = new_optimizer, 
-                      loss = vae_loss(encoded_mean,encoded_log_sigma))
-        return model, callbacks_list, input_1, encoded_mean, encoded_log_sigma
+        
+        model.beta_weight= 0.0
+        model.beta_var=tf.Variable(model.beta_weight,trainable=False,name="Beta_annealing",validate_shape=False)
+        
+        kl_loss = - 0.5 * K.mean(1 + encoded_log_var - K.square(encoded_mean) - K.exp(encoded_log_var), axis=-1)
+        
+        annealing = AnnealingCallback(model.beta_var,"cyclical",n_epochs)
+        callbacks_list.append(annealing)
     
-    model.compile(optimizer=new_optimizer, loss=customLoss)
+        model.compile(optimizer = new_optimizer, loss=vae_loss_wrapper(kl_loss, model.beta_var), metrics=[reconstruction_loss, kl_loss_wrapper(kl_loss), beta_wrapper(model.beta_var)])
+        return model, callbacks_list, input_1, encoded_mean, encoded_log_var
+    
+    model.compile(optimizer=new_optimizer, loss=reconstruction_loss)
     return model, callbacks_list, input_1, z, None
 
 def fit_model(model, callbacks_list, sequence, outseq, n_epoch):
@@ -279,6 +341,7 @@ def fit_model(model, callbacks_list, sequence, outseq, n_epoch):
     model : keras.models.Model
         Trained keras model
     """
+    
     history = model.fit([sequence, outseq], sequence, batch_size=32, epochs=n_epoch,  verbose=1,
               shuffle=False, callbacks=callbacks_list, validation_split=0.33)
     with open('./trainHistoryDict', 'wb') as file_pi:
@@ -395,6 +458,7 @@ def save_encodings_vae(model, encoder, encoder_err, sequence, ids, INPUT_FILE,
     encodings_err = np.zeros((N, encodingN))
 
     for i in np.arange(N):
+        print(i, N)
         seq = np.reshape(sequence[i, :, :], (1, sequence_len, (nfilts*2+1)))
 
         my_encoding = encoder.predict(seq)
@@ -441,7 +505,7 @@ def main():
 
     model, callbacks_list, input_1, encoded, encoded_err = make_model(args.neuronN,
                                                          args.encodingN,
-                                                         maxlen, nfilts, args.variational)
+                                                         maxlen, nfilts, args.n_epoch, args.variational)
     print(encoded_err)
     model = fit_model(model, callbacks_list, sequence, outseq, args.n_epoch)
     encoder, encoder_err = get_encoder(model, input_1, encoded, encoded_err)
@@ -459,6 +523,7 @@ def main():
         
     save_model(model, args.encodingN, args.neuronN, outdir=args.outdir)
 
+    print("saved model")
     if args.variational:
         save_encodings_vae(model, encoder, encoder_err, sequence, ids, args.lcfile,
                            args.encodingN, args.neuronN, len(ids), maxlen,
@@ -467,7 +532,8 @@ def main():
         save_encodings(model, encoder, sequence, ids, args.lcfile,
                        args.encodingN, args.neuronN, len(ids), maxlen,
                        outdir=args.outdir)
+    print("saved encodings")
 
-
+        
 if __name__ == '__main__':
     main()
