@@ -93,8 +93,11 @@ def feat_from_raenn(data_file, variational=False, model_base=None,
     model_weight_file = model_base+'.h5'
     with open(model_file, 'r') as f:
         model = model_from_json(f.read())
+
     model.load_weights(model_weight_file)
-    
+    for layer in model.layers:
+        print(layer.output_shape)
+        
     if variational:
         encodingN = model.layers[3].output_shape[-1]
         encoded = model.layers[3]
@@ -117,7 +120,6 @@ def feat_from_raenn(data_file, variational=False, model_base=None,
     for i in np.arange(len(ids)):
         inseq = np.reshape(sequence[i, :, :], (1, maxlen, nfilts*2+1))
         my_encoding = encoder.predict(inseq)
-        print(my_encoding.shape)
         encodings[i, :] = my_encoding
         encoder.reset_states()
     return encodings

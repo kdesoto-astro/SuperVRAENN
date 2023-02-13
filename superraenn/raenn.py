@@ -17,6 +17,8 @@ import tensorflow as tf
 import sys
 import pickle
 import math
+from sklearn.model_selection import train_test_split
+
 tf.compat.v1.disable_eager_execution()
 
 now = datetime.datetime.now()
@@ -24,7 +26,7 @@ date = str(now.strftime("%Y-%m-%d"))
 
 NEURON_N_DEFAULT = 100
 ENCODING_N_DEFAULT = 10
-N_EPOCH_DEFAULT = 1000
+N_EPOCH_DEFAULT = 100
 nfilts = 2
 
 class AnnealingCallback(tf.keras.callbacks.Callback):
@@ -73,7 +75,7 @@ def reconstruction_loss(yTrue, yPred):
         Predicted flux values
     """
     global nfilts
-    loss = K.mean(K.square(yTrue[:, :, 1:(1+nfilts)] - yPred[:, :, :]))
+    loss = 0.5 * K.mean(K.sum(K.square((yTrue[:, :, 1:(1+nfilts)] - yPred[:, :, :])/yTrue[:,:,(1+nfilts):]), axis=(1,2)))
     return loss
 
 def kl_loss_wrapper(kl_loss_val):
@@ -124,6 +126,33 @@ def vae_loss_wrapper(kl_loss, beta):
 
     return vae_loss
 
+def oversample_lightcurves(lightcurve_sequence, outseq, labels, max_ct_limit=None):
+    """
+    Sample the rare-type lightcurves multiple times to compensate
+    for their rarity.
+    """
+    oversampled_indices = np.array([])
+    
+    labels_unique, label_cts = np.unique(labels, return_counts=True)
+    max_ct = np.max(label_cts)
+    if max_ct_limit is not None:
+        max_ct = min(max_ct_limit, max_ct)
+    for e, l in enumerate(labels_unique):
+        if l == "peculiar":
+            continue
+        indices_w_labels = np.where(labels == l)[0]
+        extra_indices = np.random.choice(indices_w_labels, max_ct, replace=True)
+        #oversampled_indices = np.append(oversampled_indices, indices_w_labels)
+        oversampled_indices = np.append(oversampled_indices, extra_indices)
+    
+    oversampled_indices = oversampled_indices.astype(int)
+    oversampled_seq = lightcurve_sequence[oversampled_indices]
+    oversampled_outseq = outseq[oversampled_indices]
+    oversampled_labels = labels[oversampled_indices]
+
+    return oversampled_seq, oversampled_outseq, oversampled_labels
+        
+    
 def prep_input(input_lc_file, new_t_max=100.0, filler_err=1.0,
                save=False, load=False, outdir=None, prep_file=None):
     """
@@ -305,21 +334,21 @@ def make_model(LSTMN, encodingN, maxlen, nfilts, n_epochs, variational=False):
 
     if variational:
         
-        model.beta_weight= 0.0
-        model.beta_var=tf.Variable(model.beta_weight,trainable=False,name="Beta_annealing",validate_shape=False)
+        beta_weight= 0.0
+        beta_var=tf.Variable(beta_weight,trainable=False,name="Beta_annealing",validate_shape=False)
         
         kl_loss = - 0.5 * K.mean(1 + encoded_log_var - K.square(encoded_mean) - K.exp(encoded_log_var), axis=-1)
         
-        annealing = AnnealingCallback(model.beta_var,"cyclical",n_epochs)
+        annealing = AnnealingCallback(beta_var,"cyclical",n_epochs)
         callbacks_list.append(annealing)
     
-        model.compile(optimizer = new_optimizer, loss=vae_loss_wrapper(kl_loss, model.beta_var), metrics=[reconstruction_loss, kl_loss_wrapper(kl_loss), beta_wrapper(model.beta_var)])
+        model.compile(optimizer = new_optimizer, loss=vae_loss_wrapper(kl_loss, beta_var), metrics=[reconstruction_loss, kl_loss_wrapper(kl_loss), beta_wrapper(beta_var)])
         return model, callbacks_list, input_1, encoded_mean, encoded_log_var
     
     model.compile(optimizer=new_optimizer, loss=reconstruction_loss)
     return model, callbacks_list, input_1, z, None
 
-def fit_model(model, callbacks_list, sequence, outseq, n_epoch):
+def fit_model(model, labels, callbacks_list, sequence, outseq, n_epoch):
     """
     Make RAENN model
 
@@ -341,9 +370,25 @@ def fit_model(model, callbacks_list, sequence, outseq, n_epoch):
     model : keras.models.Model
         Trained keras model
     """
-    
-    history = model.fit([sequence, outseq], sequence, batch_size=32, epochs=n_epoch,  verbose=1,
-              shuffle=False, callbacks=callbacks_list, validation_split=0.33)
+    seq_train, seq_test, out_train, out_test, l_train, l_test = train_test_split(
+        sequence,
+        outseq,
+        labels,
+        test_size=0.2,
+        random_state=42
+    )
+    over_seq_train, over_out_train, over_l_train = oversample_lightcurves(seq_train, out_train, l_train, max_ct_limit=1000)
+    over_seq_test, over_out_test, over_l_test = oversample_lightcurves(seq_test, out_test, l_test)
+    history = model.fit([over_seq_train, over_out_train],
+                        over_seq_train,
+                        batch_size=32,
+                        epochs=n_epoch,
+                        verbose=1,
+                        shuffle=False,
+                        callbacks=callbacks_list,
+                        validation_data=[[over_seq_test, over_out_test], over_seq_test]
+                       )
+                        
     with open('./trainHistoryDict', 'wb') as file_pi:
         pickle.dump(history.history, file_pi)
     return model
@@ -372,9 +417,13 @@ def get_encoder(model, input_1, encoded, encoded_err=None):
 
 def get_decoder(model, encodingN):
     encoded_input = Input(shape=(None, (encodingN+2)))
+    decoder_layer1 = model.layers[-3]
     decoder_layer2 = model.layers[-2]
     decoder_layer3 = model.layers[-1]
-    decoder = Model(encoded_input, decoder_layer3(decoder_layer2(encoded_input)))
+    dc1 = decoder_layer1(encoded_input)
+    dc2 = decoder_layer2(dc1)
+    dc3 = decoder_layer3(dc2)
+    decoder = Model(encoded_input, dc3)
     return decoder
 
 
@@ -382,25 +431,30 @@ def get_decodings(decoder, encoder, sequence, lms, encodingN, sequence_len, plot
 
     global nfilts
     
+    decodings = []
+    
+    for i in np.arange(len(sequence)):
+        seq = np.reshape(sequence[i, :, :], (1, sequence_len, 2*nfilts+1))
+        encoding1 = encoder.predict(seq)[-1]
+        encoding1 = np.vstack([encoding1]).reshape((1, 1, encodingN))
+        repeater1 = np.repeat(encoding1, sequence_len, axis=1)
+        out_seq = np.reshape(seq[:, :, 0], (len(seq), sequence_len, 1))
+        lms_test = np.reshape(np.repeat(lms[i], sequence_len), (len(seq), -1))
+        out_seq = np.dstack((out_seq, lms_test))
+
+        decoding_input2 = np.concatenate((repeater1, out_seq), axis=-1)
+
+        decoding2 = decoder.predict(decoding_input2)[0]
+        decodings.append(decoding2)
+    
     if plot:
-        for i in np.arange(len(sequence)):
-            seq = np.reshape(sequence[i, :, :], (1, sequence_len, 9))
-            encoding1 = encoder.predict(seq)[-1]
-            encoding1 = np.vstack([encoding1]).reshape((1, 1, encodingN))
-            repeater1 = np.repeat(encoding1, sequence_len, axis=1)
-            out_seq = np.reshape(seq[:, :, 0], (len(seq), sequence_len, 1))
-            lms_test = np.reshape(np.repeat(lms[i], sequence_len), (len(seq), -1))
-            out_seq = np.dstack((out_seq, lms_test))
+        for f in range(nfilts):
+            plt.plot(seq[0, :, 0], seq[0, :, f+1], 'green', alpha=1.0, linewidth=1)
+            plt.plot(seq[0, :, 0], decoding2[:, f], 'green', alpha=0.2, linewidth=10)
+            plt.close()
+        #plt.savefig("../../products/") #TODO: need to change to a savefig command, also rearrange to return decodings w/o plotting
 
-            decoding_input2 = np.concatenate((repeater1, out_seq), axis=-1)
-
-            decoding2 = decoder.predict(decoding_input2)[0]
-            
-            for f in range(nfilts):
-                plt.plot(seq[0, :, 0], seq[0, :, f+1], 'green', alpha=1.0, linewidth=1)
-                plt.plot(seq[0, :, 0], decoding2[:, f], 'green', alpha=0.2, linewidth=10)
-            plt.show() #TODO: need to change to a savefig command, also rearrange to return decodings w/o plotting
-
+    return np.array(decodings)
 
 def save_model(model, encodingN, LSTMN, model_dir='models/', outdir='./'):
     # make output dir
@@ -458,7 +512,6 @@ def save_encodings_vae(model, encoder, encoder_err, sequence, ids, INPUT_FILE,
     encodings_err = np.zeros((N, encodingN))
 
     for i in np.arange(N):
-        print(i, N)
         seq = np.reshape(sequence[i, :, :], (1, sequence_len, (nfilts*2+1)))
 
         my_encoding = encoder.predict(seq)
@@ -490,6 +543,8 @@ def main():
     parser.add_argument('--n-epoch', type=int, dest='n_epoch',
                         default=N_EPOCH_DEFAULT,
                         help='Number of epochs to train for')
+    parser.add_argument('--metafile', type=str, default="./ztf_data/ztf_metadata_fixed.dat",
+                        help='File with metadata')
 
     args = parser.parse_args()
 
@@ -507,7 +562,11 @@ def main():
                                                          args.encodingN,
                                                          maxlen, nfilts, args.n_epoch, args.variational)
     print(encoded_err)
-    model = fit_model(model, callbacks_list, sequence, outseq, args.n_epoch)
+
+    obj, redshift, obj_type, \
+        my_peak, ebv = np.loadtxt(args.metafile, unpack=True, dtype=str, delimiter=' ')
+
+    model = fit_model(model, obj_type, callbacks_list, sequence, outseq, args.n_epoch)
     encoder, encoder_err = get_encoder(model, input_1, encoded, encoded_err)
 
     print(encoded_err)
