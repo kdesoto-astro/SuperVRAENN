@@ -388,10 +388,8 @@ def fit_model(model, labels, callbacks_list, sequence, outseq, n_epoch):
                         callbacks=callbacks_list,
                         validation_data=[[over_seq_test, over_out_test], over_seq_test]
                        )
-                        
-    with open('./trainHistoryDict', 'wb') as file_pi:
-        pickle.dump(history.history, file_pi)
-    return model
+
+    return model, history
 
 
 def test_model(sequence_test, model, lms, sequence_len, plot=True):
@@ -566,7 +564,11 @@ def main():
     obj, redshift, obj_type, \
         my_peak, ebv = np.loadtxt(args.metafile, unpack=True, dtype=str, delimiter=' ')
 
-    model = fit_model(model, obj_type, callbacks_list, sequence, outseq, args.n_epoch)
+    model, history = fit_model(model, obj_type, callbacks_list, sequence, outseq, args.n_epoch)
+                            
+    with open('./trainHistoryDict', 'wb') as file_pi:
+        pickle.dump(history.history, file_pi)
+        
     encoder, encoder_err = get_encoder(model, input_1, encoded, encoded_err)
 
     print(encoded_err)
