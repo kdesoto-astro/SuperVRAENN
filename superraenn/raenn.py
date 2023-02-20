@@ -2,7 +2,7 @@
 from argparse import ArgumentParser
 from keras.models import Model
 from keras.layers import Input, GRU, TimeDistributed
-from keras.layers import Dense, concatenate, Lambda
+from keras.layers import Dense, concatenate, Lambda, Layer
 from keras.layers import RepeatVector
 from keras.optimizers import Adam
 import numpy as np
@@ -12,14 +12,15 @@ from keras.callbacks import EarlyStopping, Callback
 import datetime
 import os
 import logging
-from keras.losses import mse
 import tensorflow as tf
 import sys
 import pickle
 import math
 from sklearn.model_selection import train_test_split
 
-tf.compat.v1.disable_eager_execution()
+#tf.compat.v1.disable_eager_execution()
+#from tensorflow.python.framework.ops import disable_eager_execution
+#disable_eager_execution()
 
 now = datetime.datetime.now()
 date = str(now.strftime("%Y-%m-%d"))
@@ -62,21 +63,6 @@ class AnnealingCallback(tf.keras.callbacks.Callback):
                 new_value = 1.
             tf.keras.backend.set_value(self.beta,new_value)
             print("\n Current beta: "+str(tf.keras.backend.get_value(self.beta)))
-            
-def reconstruction_loss(yTrue, yPred):
-    """
-    Custom loss which doesn't use the errors
-
-    Parameters
-    ----------
-    yTrue : array
-        True flux values
-    yPred : array
-        Predicted flux values
-    """
-    global nfilts
-    loss = 0.5 * K.mean(K.sum(K.square((yTrue[:, :, 1:(1+nfilts)] - yPred[:, :, :])/yTrue[:,:,(1+nfilts):]), axis=(1,2)))
-    return loss
 
 def kl_loss_wrapper(kl_loss_val):
     """
@@ -95,36 +81,22 @@ def beta_wrapper(beta):
         return beta
     
     return annealing_beta
-    
-def vae_loss_wrapper(kl_loss, beta):
+
+class ReconstructionLoss(tf.keras.losses.Loss):
     """
-    Loss associated with a variational auto-encoder. Includes the
-    traditional AE loss term and an additional KL divergence which
-    pushes the latent space towards a Gaussian profile.
-    
+    Custom loss which doesn't use the errors
+
     Parameters
     ----------
-    encoded_mean : array
-        Mean of the latent distribution
-    encoded_log_var : array
-        Log of the variance of the (Gaussian) latent distribution
-        
-    Returns
-    ----------
-    lossFunction : function
-        Takes the original and decoded lightcurves as inputs
+    yTrue : array
+        True flux values
+    yPred : array
+        Predicted flux values
     """
-    global nfilts
-
-    #kl_loss = - 0.5 * K.mean(1 + encoded_log_sigma - K.square(encoded_mean) - K.exp(encoded_log_sigma), axis=-1)
-
-    def vae_loss(yTrue,yPred):   
-        # p(reconstruction) = (1/sigma/sqrt(2pi)) * e^-(x-hat)^2/sigma^2
-        # NLL = -log(1/sigma/sqrt(2pi)) + (x-hat)^2/sigma^2
-        # can drop the constant terms, assume sigma=1 for now
-        return reconstruction_loss(yTrue, yPred) + beta * kl_loss
-
-    return vae_loss
+    def __call__(self, y_true, y_pred, sample_weight=None):
+        nfilts = 2
+        loss = 0.5 * tf.reduce_mean(tf.reduce_sum(((y_true[:, :, 1:(1+nfilts)] - y_pred[:, :, :])/y_true[:,:,(1+nfilts):])**2, axis=(1,2)))
+        return loss
 
 def oversample_lightcurves(lightcurve_sequence, outseq, labels, max_ct_limit=None):
     """
@@ -239,7 +211,8 @@ def prep_input(input_lc_file, new_t_max=100.0, filler_err=1.0,
         np.savez(model_prep_file, sequence=sequence, bandmin=bandmin, bandmax=bandmax)
     return sequence, outseq, ids, int(sequence_len), nfilts
 
-def sampling(samp_args):
+        
+class Sampling(Layer):
     """
     Samples from the latent normal distribution using
     reparametrization to maintain gradient propagation.
@@ -255,13 +228,25 @@ def sampling(samp_args):
     sample : array
         a sampled value from the latent space
     """
-    z_mean, z_log_var = samp_args
+    def __init__(self):
+        super(Sampling, self).__init__()
+        
+        beta_weight = 0.0
+        self.beta = tf.Variable(beta_weight,trainable=False,name="Beta_annealing",validate_shape=False)
 
-    batch = K.shape(z_mean)[0]
-    dim = K.int_shape(z_mean)[1]
-    # by default, random_normal has mean = 0 and std = 1.0
-    epsilon = K.random_normal(shape=(batch, dim))
-    return z_mean + K.exp(0.5 * z_log_var) * epsilon
+    def call(self, inputs):
+        z_mean, z_log_var = inputs
+        batch = tf.shape(z_mean)[0]
+        dim = tf.shape(z_mean)[1]
+        epsilon = tf.keras.backend.random_normal(shape=(batch, dim))
+        
+        #Add regularizer loss
+        kl_loss = - 0.5 * tf.reduce_mean(1 + z_log_var - z_mean**2 - tf.math.exp(z_log_var))
+        self.add_metric(kl_loss, "KL_loss")
+        self.add_loss(self.beta * kl_loss)
+        self.add_metric(self.beta, "beta")
+        
+        return z_mean + tf.exp(0.5 * z_log_var) * epsilon
 
 def make_model(LSTMN, encodingN, maxlen, nfilts, n_epochs, variational=False):
     """
@@ -297,55 +282,54 @@ def make_model(LSTMN, encodingN, maxlen, nfilts, n_epochs, variational=False):
     input_1 = Input((None, nfilts*2+1))
     input_2 = Input((maxlen, 2))
 
-    encoder1 = GRU(LSTMN, return_sequences=True, activation='tanh', recurrent_activation='hard_sigmoid')(input_1)
-    encoder2 = GRU(LSTMN, return_sequences=True, activation='relu', recurrent_activation='hard_sigmoid')(encoder1)
+    encoder1 = GRU(LSTMN, return_sequences=True, name="enc_1")(input_1)
+    encoder2 = GRU(LSTMN, return_sequences=True, name="enc_2")(encoder1)
     # TODO: change hardcoded 2 layers to adjustable num layers
-    
-    if variational:
-        encoded_mean = GRU(encodingN, return_sequences=False, activation='linear')(encoder2)
-        encoded_log_var = GRU(encodingN, return_sequences=False, activation='linear')(encoder2)
-        print(encoded_log_var)
-        z = Lambda(sampling, output_shape=(encodingN,))([encoded_mean, encoded_log_var])
-    else:
-        z = GRU(encodingN, return_sequences=False, activation='tanh',
-                      recurrent_activation='hard_sigmoid')(encoder2)
-        
-    repeater = RepeatVector(maxlen)(z)
-    merged = concatenate([repeater, input_2], axis=-1)
-    decoder1 = GRU(LSTMN, return_sequences=True, activation='tanh', recurrent_activation='hard_sigmoid')(merged)
-    decoder2 = GRU(LSTMN, return_sequences=True, activation='tanh', recurrent_activation='hard_sigmoid')(decoder1)
-    # TODO: again get rid of hardcoded number of layers
-    decoder3 = TimeDistributed(Dense(nfilts, activation='tanh'),
-                               input_shape=(None, 1))(decoder2)
 
-    model = Model([input_1, input_2], decoder3)
-   
-
-    new_optimizer = Adam(learning_rate=1e-4, beta_1=0.9, beta_2=0.999,
-                         decay=0) # TODO: have this adjustable params, config file?
-    
-    es = EarlyStopping(monitor='val_loss', min_delta=0, patience=50,
+    es = EarlyStopping(monitor='val_loss', min_delta=0, patience=250,
                        verbose=0, mode='min', baseline=None,
                        restore_best_weights=True)
 
     
 
     callbacks_list = [es]
-
+    
     if variational:
         
-        beta_weight= 0.0
-        beta_var=tf.Variable(beta_weight,trainable=False,name="Beta_annealing",validate_shape=False)
         
-        kl_loss = - 0.5 * K.mean(1 + encoded_log_var - K.square(encoded_mean) - K.exp(encoded_log_var), axis=-1)
+        encoded_mean = GRU(encodingN, return_sequences=False, activation='tanh', name="mu")(encoder2)
+        encoded_log_var = GRU(encodingN, return_sequences=False, activation='tanh', name="sigma")(encoder2)
         
-        annealing = AnnealingCallback(beta_var,"cyclical",n_epochs)
+        sampling = Sampling()
+        z = sampling([encoded_mean, encoded_log_var])
+        
+        annealing = AnnealingCallback(sampling.beta,"cyclical",n_epochs)
         callbacks_list.append(annealing)
-    
-        model.compile(optimizer = new_optimizer, loss=vae_loss_wrapper(kl_loss, beta_var), metrics=[reconstruction_loss, kl_loss_wrapper(kl_loss), beta_wrapper(beta_var)])
+        
+    else:
+        z = GRU(encodingN, return_sequences=False, activation='tanh',
+                      recurrent_activation='sigmoid', name="z")(encoder2)
+        
+    repeater = RepeatVector(maxlen)(z)
+    merged = concatenate([repeater, input_2], axis=-1)
+    decoder1 = GRU(LSTMN, return_sequences=True, activation='tanh', recurrent_activation='sigmoid', name="dec_1")(merged)
+    decoder2 = GRU(LSTMN, return_sequences=True, activation='tanh', recurrent_activation='sigmoid', name="dec_2")(decoder1)
+    # TODO: again get rid of hardcoded number of layers
+    decoder3 = TimeDistributed(Dense(nfilts, activation='tanh'),
+                               input_shape=(None, 1), name="out")(decoder2)
+
+    model = Model([input_1, input_2], decoder3)
+   
+
+    new_optimizer = Adam(learning_rate=1e-4, beta_1=0.9, beta_2=0.999,
+                         decay=0) # TODO: have this adjustable params, config file?
+
+    rl = ReconstructionLoss()
+    model.compile(optimizer=new_optimizer, loss=rl)
+
+    if variational:
         return model, callbacks_list, input_1, encoded_mean, encoded_log_var
-    
-    model.compile(optimizer=new_optimizer, loss=reconstruction_loss)
+        
     return model, callbacks_list, input_1, z, None
 
 def fit_model(model, labels, callbacks_list, sequence, outseq, n_epoch):
@@ -381,9 +365,9 @@ def fit_model(model, labels, callbacks_list, sequence, outseq, n_epoch):
     over_seq_test, over_out_test, over_l_test = oversample_lightcurves(seq_test, out_test, l_test)
     history = model.fit([over_seq_train, over_out_train],
                         over_seq_train,
-                        batch_size=32,
+                        batch_size=512,
                         epochs=n_epoch,
-                        verbose=1,
+                        verbose=2,
                         shuffle=False,
                         callbacks=callbacks_list,
                         validation_data=[[over_seq_test, over_out_test], over_seq_test]
@@ -486,7 +470,7 @@ def save_encodings(model, encoder, sequence, ids, INPUT_FILE,
     for i in np.arange(N):
         seq = np.reshape(sequence[i, :, :], (1, sequence_len, 2*nfilts+1))
 
-        my_encoding = encoder.predict(seq)
+        my_encoding = encoder.predict(seq, verbose=0)
 
         encodings[i, :] = my_encoding
         encoder.reset_states()
@@ -512,8 +496,8 @@ def save_encodings_vae(model, encoder, encoder_err, sequence, ids, INPUT_FILE,
     for i in np.arange(N):
         seq = np.reshape(sequence[i, :, :], (1, sequence_len, (nfilts*2+1)))
 
-        my_encoding = encoder.predict(seq)
-        my_encoding_err = encoder_err.predict(seq)
+        my_encoding = encoder.predict(seq, verbose=0)
+        my_encoding_err = encoder_err.predict(seq, verbose=0)
 
         encodings[i, :] = my_encoding
         encodings_err[i, :] = my_encoding_err
@@ -559,7 +543,6 @@ def main():
     model, callbacks_list, input_1, encoded, encoded_err = make_model(args.neuronN,
                                                          args.encodingN,
                                                          maxlen, nfilts, args.n_epoch, args.variational)
-    print(encoded_err)
 
     obj, redshift, obj_type, \
         my_peak, ebv = np.loadtxt(args.metafile, unpack=True, dtype=str, delimiter=' ')
@@ -571,7 +554,6 @@ def main():
         
     encoder, encoder_err = get_encoder(model, input_1, encoded, encoded_err)
 
-    print(encoded_err)
     # These comments used in testing, and sould be removed...
     # lms = outseq[:, 0, 1]
     # test_model(sequence_test, model, lm, maxlen, plot=True)
