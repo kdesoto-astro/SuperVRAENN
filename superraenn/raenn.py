@@ -2,12 +2,10 @@
 from argparse import ArgumentParser
 from keras.models import Model
 from keras.layers import Input, GRU, TimeDistributed
-from keras.layers import Dense, concatenate, Lambda, Layer
-from keras.layers import RepeatVector
+from keras.layers import Dense, concatenate, Layer, RepeatVector
 from keras.optimizers import Adam
 import numpy as np
 import matplotlib.pyplot as plt
-import keras.backend as K
 from keras.callbacks import EarlyStopping, Callback
 import datetime
 import os
