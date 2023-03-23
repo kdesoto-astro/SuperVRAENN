@@ -1,16 +1,18 @@
 # lstm autoencoder recreate sequence
 from argparse import ArgumentParser
-from keras.models import Model
-from keras.layers import Input, GRU, TimeDistributed
-from keras.layers import Dense, concatenate, Layer, RepeatVector
-from keras.optimizers import Adam
 import numpy as np
 import matplotlib.pyplot as plt
+
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, GRU, TimeDistributed
+from tensorflow.keras.layers import Dense, concatenate, Layer, RepeatVector
+from keras.optimizers import Adam
 from keras.callbacks import EarlyStopping, Callback
+
 import datetime
 import os
 import logging
-import tensorflow as tf
 import sys
 import pickle
 import math
@@ -28,7 +30,7 @@ ENCODING_N_DEFAULT = 10
 N_EPOCH_DEFAULT = 100
 nfilts = 2
 
-class AnnealingCallback(tf.keras.callbacks.Callback):
+class AnnealingCallback(Callback):
     """
     Copied over from https://github.com/larngroup/KL_divergence_loss/blob/main/annealing_helper_objects.py.
     """
@@ -93,7 +95,10 @@ class ReconstructionLoss(tf.keras.losses.Loss):
     """
     def __call__(self, y_true, y_pred, sample_weight=None):
         nfilts = 2
-        loss = 0.5 * tf.reduce_mean(tf.reduce_sum(((y_true[:, :, 1:(1+nfilts)] - y_pred[:, :, :])/y_true[:,:,(1+nfilts):])**2, axis=(1,2)))
+        f_true = y_true[:, :, 1:(1+nfilts)]
+        err_true = y_true[:,:,(1+nfilts):]
+        reduced_sum = tf.reduce_sum(((f_true - y_pred[:, :, :])/err_true)**2, axis=(1,2))
+        loss = tf.math.log(0.5 * tf.reduce_mean(reduced_sum))
         return loss
 
 def oversample_lightcurves(lightcurve_sequence, outseq, labels, max_ct_limit=None):
@@ -174,6 +179,7 @@ def prep_input(input_lc_file, new_t_max=100.0, filler_err=1.0,
 
     lms = []
     for i, lightcurve in enumerate(lightcurves):
+        #print(np.mean(lightcurve.abs_mags_err), np.mean(lightcurve.dense_lc[:,:,1]))
         sequence[i, 0:lengths[i], 0] = lightcurve.times
         sequence[i, 0:lengths[i], 1:nfiltsp1] = lightcurve.dense_lc[:, :, 0]
         sequence[i, 0:lengths[i], nfiltsp1:] = lightcurve.dense_lc[:, :, 1]
@@ -192,7 +198,7 @@ def prep_input(input_lc_file, new_t_max=100.0, filler_err=1.0,
     else:
         bandmin = np.min(sequence[:, :, 1:nfiltsp1])
         bandmax = np.max(sequence[:, :, 1:nfiltsp1])
-
+        
     sequence[:, :, 1:nfiltsp1] = (sequence[:, :, 1:nfiltsp1] - bandmin) \
         / (bandmax - bandmin)
     sequence[:, :, nfiltsp1:] = (sequence[:, :, nfiltsp1:]) \
@@ -226,11 +232,10 @@ class Sampling(Layer):
     sample : array
         a sampled value from the latent space
     """
-    def __init__(self):
-        super(Sampling, self).__init__()
-        
+    def __init__(self, **kwargs):
         beta_weight = 0.0
         self.beta = tf.Variable(beta_weight,trainable=False,name="Beta_annealing",validate_shape=False)
+        super(Sampling, self).__init__(**kwargs)
 
     def call(self, inputs):
         z_mean, z_log_var = inputs
@@ -284,7 +289,7 @@ def make_model(LSTMN, encodingN, maxlen, nfilts, n_epochs, variational=False):
     encoder2 = GRU(LSTMN, return_sequences=True, name="enc_2")(encoder1)
     # TODO: change hardcoded 2 layers to adjustable num layers
 
-    es = EarlyStopping(monitor='val_loss', min_delta=0, patience=250,
+    es = EarlyStopping(monitor='val_loss', min_delta=0, patience=1000,
                        verbose=0, mode='min', baseline=None,
                        restore_best_weights=True)
 
@@ -319,8 +324,7 @@ def make_model(LSTMN, encodingN, maxlen, nfilts, n_epochs, variational=False):
     model = Model([input_1, input_2], decoder3)
    
 
-    new_optimizer = Adam(learning_rate=1e-4, beta_1=0.9, beta_2=0.999,
-                         decay=0) # TODO: have this adjustable params, config file?
+    new_optimizer = Adam(learning_rate=1e-4, beta_1=0.9, beta_2=0.999) # TODO: have this adjustable params, config file?
 
     rl = ReconstructionLoss()
     model.compile(optimizer=new_optimizer, loss=rl)
@@ -562,7 +566,10 @@ def main():
     if args.outdir[-1] != '/':
         args.outdir += '/'
         
-    save_model(model, args.encodingN, args.neuronN, outdir=args.outdir)
+    if args.variational:
+        save_model(model, args.encodingN, args.neuronN, model_dir='models_vae/', outdir=args.outdir)
+    else:
+        save_model(model, args.encodingN, args.neuronN, outdir=args.outdir)
 
     print("saved model")
     if args.variational:

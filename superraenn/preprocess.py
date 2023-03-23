@@ -112,9 +112,13 @@ def main():
 
     # Update the LC objects with info from the metatable
     my_lcs = []
+    # assuming args.lm is one number
+    lm_dict = {f: args.lm for f in filt_dict}
     for i, my_lc in enumerate(lc_list):
-        my_lc.add_LC_info(zpt=args.zpt, mwebv=ebvs[i],
-                          redshift=redshifts[i], lim_mag=args.lm,
+        my_lc.add_LC_info(lim_mag_dict=lm_dict,
+                          zpt=args.zpt,
+                          mwebv=ebvs[i],
+                          redshift=redshifts[i], 
                           obj_type=obj_types[i])
         my_lc.get_abs_mags()
         my_lc.sort_lc()

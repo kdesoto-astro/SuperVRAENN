@@ -5,3 +5,6 @@ scipy
 astropy
 recommonmark
 keras
+matplotlib
+scikit-learn
+extinction
