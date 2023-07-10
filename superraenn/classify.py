@@ -212,10 +212,10 @@ def prep_data_for_training(featurefile, metatable, whiten=True):
             continue
 
         if X == []:
-            X = features[gind][0]
+            X = np.reshape(features[gind][0], (1, 10))
             y = sn_num
         else:
-            X = np.vstack((X, features[gind][0]))
+            X = np.vstack((X, np.reshape(features[gind][0], (1, 10))))
             y = np.append(y, sn_num)
         final_sn_names.append(sn_name)
 

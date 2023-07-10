@@ -1,11 +1,12 @@
 import numpy as np
 from .lc import LightCurve
-from .raenn import prep_input, get_decoder, get_decodings
+from .raenn import prep_input, get_decoder, get_decodings, get_encoder
 import argparse
-from keras.models import model_from_json, Model
+from keras.models import model_from_json, Model, load_model
 from keras.layers import Input
+from .custom_nn_layers import Sampling, SimilarityLossLayer, ReconstructionLoss, ConsistencyLossLayer, SpecLossLayer
 import datetime
-import os
+import os, glob
 
 now = datetime.datetime.now()
 date = str(now.strftime("%Y-%m-%d"))
@@ -65,7 +66,7 @@ def read_in_LC_files(input_files, obj_names, style='SNANA'):
     return LC_list
 
 
-def feat_from_raenn(data_file, variational=False, model_base=None,
+def feat_from_raenn(data_folder, metaf, variational=False, model_base=None,
                     prep_file=None, plot=False):
     """
     Calculate RAENN features
@@ -88,41 +89,48 @@ def feat_from_raenn(data_file, variational=False, model_base=None,
     ----
     - prep file seems unnecessary
     """
-    sequence, outseq, ids, maxlen, nfilts = prep_input(data_file, load=True, prep_file=prep_file)
-    model_file = model_base + '.json'
+    obj, redshift, obj_type, \
+        my_peak, ebv = np.loadtxt(metaf, unpack=True, dtype=str, delimiter=' ')
+    
+    redshift = redshift.astype(float)
+    
+    sequence, outseq, ids, maxlen, nfilts, redshifts, labels, bandmin, bandmax = prep_input(
+        data_folder,
+        redshift,
+        obj_type,
+        load=True,
+        prep_file=prep_file
+    )
+
+    nfiltsp1 = 3
+
+    model_file = model_base
     model_weight_file = model_base+'.h5'
-    with open(model_file, 'r') as f:
-        model = model_from_json(f.read())
-
-    model.load_weights(model_weight_file)
-    for layer in model.layers:
-        print(layer.output_shape)
+    
+    model = load_model(model_file, custom_objects={'ReconstructionLoss': ReconstructionLoss, 'Sampling': Sampling, 'SimilarityLossLayer': SimilarityLossLayer, 'ConsistencyLossLayer': ConsistencyLossLayer, 'SpecLossLayer': SpecLossLayer,})
         
-    if variational:
-        encodingN = model.layers[3].output_shape[-1]
-        encoded = model.layers[3]
-    else:
-        encodingN = model.layers[2].output_shape[-1]
-        encoded = model.layers[2]
-    print(encodingN)
-    original_input = Input(shape=(None, nfilts*2+1))
-    encoded1 = model.layers[1]
-    encoder = Model(original_input, encoded(encoded1(original_input)))
-
+    model.load_weights(model_weight_file)
+    
+    encoder = get_encoder_new(model)
+    encodingN = 10
+    encodings = encoder.predict(sequence[:,:,:-2])
+    encodings = np.reshape(encodings, (-1, encodingN))
+    """
     if plot:
         decoder = get_decoder(model, encodingN)
         lms = outseq[:, 0, 1]
         sequence_len = maxlen
         print(lms)
         get_decodings(decoder, encoder, sequence, lms, encodingN, sequence_len)
-
+    
     encodings = np.zeros((len(ids), encodingN))
     for i in np.arange(len(ids)):
-        inseq = np.reshape(sequence[i, :, :], (1, maxlen, nfilts*2+1))
-        my_encoding = encoder.predict(inseq)
+        inseq = np.reshape(sequence[i, :, :], (1, maxlen, nfilts*2+3))
+        my_encoding = model.predict([inseq, outseq, labels, np.copy(inseq)])
         encodings[i, :] = my_encoding
         encoder.reset_states()
-    return encodings
+    """
+    return encodings, ids
 
 
 def feat_peaks(input_lcs):
@@ -228,7 +236,7 @@ def main():
     parser.add_argument('--outdir', type=str, default='./products/',
                         help='Path in which to save the LC data (single file)')
     parser.add_argument('--plot', type=str2bool, default=False, help='Plot LCs, for testing')
-    parser.add_argument('--model-base', type=str, dest='model_base', default='./products/models/model', help='...')
+    parser.add_argument('--model-base', type=str, dest='model_base', default='./products/models_vae/model', help='...')
     parser.add_argument('--get-feat-raenn', type=str2bool, dest='get_feat_raenn', default=True, help='...')
     parser.add_argument('--variational', type=str2bool, dest='variational', default=False, help='...')
     parser.add_argument('--get-feat-peaks', type=str2bool, dest='get_feat_peaks', default=True, help='...')
@@ -245,6 +253,8 @@ def main():
     parser.add_argument('--get-feat-int', type=str2bool, dest='get_feat_int', default=True, help='...')
     parser.add_argument('--prep-file', type=str, dest='prep_file', default='./products/prep.npz', help='...')
     parser.add_argument('--outfile', type=str, dest='outfile', default='feat', help='...')
+    parser.add_argument('--metafile', type=str, default="./ztf_data/ztf_metadata_fixed.dat",
+                        help='File with metadata')
 
     args = parser.parse_args()
     features = []
@@ -253,9 +263,15 @@ def main():
     max_inds_all = []
     preds_all = []
     
-    input_lcs = np.load(args.lcfile, allow_pickle=True)['lcs']
-    for i, input_lc in enumerate(input_lcs):
-        ids.append(input_lc.name)
+    #input_lcs = np.load(args.lcfile, allow_pickle=True)['lcs']
+    input_lcs = []
+    for input_lc_file in glob.glob(os.path.join(args.lcfile, "lcs_?.npz")):
+        lc_single = np.load(input_lc_file, allow_pickle=True)['lcs']
+        input_lcs.extend(lc_single)
+    
+    #for i, input_lc in enumerate(input_lcs):
+    #    ids.append(input_lc.name)
+        """
         gp = input_lc.gp
         gp_mags = input_lc.gp_mags
         t_falls = []
@@ -272,9 +288,9 @@ def main():
             max_inds.append(max_ind)
         preds_all.append(preds)
         max_inds_all.append(max_inds)
-
+        """
     if args.get_feat_raenn:
-        feat = feat_from_raenn(args.lcfile, variational=args.variational, model_base=args.model_base,
+        feat, ids = feat_from_raenn(args.lcfile, args.metafile, variational=args.variational, model_base=args.model_base,
                                prep_file=args.prep_file, plot=args.plot)
         if features != []:
             features = np.hstack((features, feat))
@@ -283,7 +299,7 @@ def main():
         for i in np.arange(np.shape(feat)[-1]):
             feat_names.append('raenn'+str(i))
         print('RAENN feat done')
-
+    """
     if args.get_feat_peaks:
         feat = feat_peaks(input_lcs)
         if features != []:
@@ -352,7 +368,7 @@ def main():
         for i in np.arange(np.shape(feat)[-1]):
             feat_names.append('int'+str(i))
         print('int feat done')
-
+    """
     if args.outdir[-1] != '/':
         args.outdir += '/'
     save_features(features, ids, feat_names, args.outfile+'_'+date, outdir=args.outdir)

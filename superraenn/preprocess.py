@@ -46,7 +46,7 @@ def read_in_meta_table(metatable):
     return obj, redshift, obj_type, my_peak, ebv
 
 
-def save_lcs(lc_list, output_dir):
+def save_lcs(lc_list, output_dir, suffix):
     """
     Save light curves as a lightcurve object
 
@@ -62,7 +62,7 @@ def save_lcs(lc_list, output_dir):
     """
     now = datetime.datetime.now()
     date = str(now.strftime("%Y-%m-%d"))
-    file_name = 'lcs_' + date + '.npz'
+    file_name = 'lcs_%s_%s.npz' % (suffix, date)
 
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -73,9 +73,11 @@ def save_lcs(lc_list, output_dir):
     output_file = output_dir + file_name
     np.savez(output_file, lcs=lc_list)
     # Also easy save to latest
-    np.savez(output_dir+'lcs.npz', lcs=lc_list)
+    np.savez(output_dir+'lcs_%s.npz' % suffix, lcs=lc_list)
 
     logging.info(f'Saved to {output_file}')
+    
+    del now, date
 
 
 def main():
