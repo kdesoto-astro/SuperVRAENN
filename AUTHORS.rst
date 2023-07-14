@@ -5,9 +5,11 @@ Credits
 Maintainer
 ----------
 
-* V. Ashley Villar <ashley.villar@gmail.com>
+* K. de Soto <kdesoto@g.harvard.edu>
 
 Contributors
 ------------
 
-None yet. Why not be the first? See: CONTRIBUTING.rst
+* V. Ashley Villar <ashley.villar@gmail.com>
+
+See: CONTRIBUTING.rst
