@@ -13,7 +13,7 @@ PARAMS_INIT = jnp.array([
 # Input prep params
 NEW_LC_MIN_NPOINT = 5
 NEW_LC_MAX_NPOINT = 30
-PAD_SIZE = 300
+PAD_SIZE = 100
 
 # RAENN default params
 NEURON_N_DEFAULT = 64

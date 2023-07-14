@@ -6,6 +6,8 @@ from jax import jit
 
 from tinygp import kernels, transforms, GaussianProcess
 
+jax.config.update("jax_enable_x64", True)
+
 l2_dist = L2Distance()
 
 

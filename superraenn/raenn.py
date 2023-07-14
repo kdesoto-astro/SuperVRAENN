@@ -142,7 +142,7 @@ def make_model(
     callbacks_list.append(annealing)
         
     encoder_output = encoder(input_1[:,:,:-1]) # dont include redshifts
-    flatten_output = Flatten()(encoder_output)
+    #flatten_output = Flatten()(encoder_output)
     #flatten_layer_z = encoder(input_4[:,:,:-1])
     
     #encoder.add_metric(tf.reduce_max(encoder_output), "encoder_output")
@@ -153,8 +153,8 @@ def make_model(
     encoded_log_var_layer = Dense(encodingN, activation='linear', name="sigma", kernel_initializer=tf.keras.initializers.RandomNormal(stddev=0.01),
                            )
     
-    encoded_mean = encoded_mean_layer(flatten_output)
-    encoded_log_var = encoded_log_var_layer(flatten_output)
+    encoded_mean = encoded_mean_layer(encoder_output)
+    encoded_log_var = encoded_log_var_layer(encoder_output)
 
     #encoded_mean_z = encoded_mean_layer(flatten_layer_z)
     #encoded_log_var_z = encoded_log_var_layer(flatten_layer_z)
@@ -275,15 +275,18 @@ def get_decoder(model, encodingN):
     decoder = Model(encoded_input, dc)
     return decoder
 
-def get_encoder(model):
-    global nfilts
-    inputs = Input(shape=(PAD_SIZE, 2*nfilts+2))
-    encoder_layer = model.layers[4]
-    mean_layer = model.layers[5]
+def get_encoder(model, nfilts):
+    print(model.summary())
+    inputs = Input(shape=(PAD_SIZE, 2*nfilts+1))
+    encoder_layer = model.layers[2]
+    mean_layer = model.layers[3]
+    var_layer = model.layers[4]
     layer_1 = encoder_layer(inputs)
-    dc = mean_layer(layer_1)
-    encoder = Model(inputs, dc)
-    return encoder
+    mu = mean_layer(layer_1)
+    sig = var_layer(layer_1)
+    encoder = Model(inputs, mu)
+    encoder_err = Model(inputs, sig)
+    return encoder, encoder_err
 
 
 def get_decodings(decoder, encoder, sequence, outseq, encodingN, sequence_len, bandmin, bandmax, plot=False):
@@ -331,14 +334,13 @@ def save_encodings_vae(model, encoder, encoder_err, sequence, lc_folder,
                    encodingN, LSTMN, N, sequence_len,
                    model_dir='encodings/', outdir='./'):
     
-    nfilts = sequence.shape[-1]
     # Make output directory
     model_dir = outdir + model_dir
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
 
-    encodings = encoder.predict(sequence, verbose=0)
-    encodings_err = encoder.predict(sequence, verbose=0)
+    encodings = encoder.predict(sequence[:,:,:-1], verbose=0)
+    encodings_err = encoder_err.predict(sequence[:,:,:-1], verbose=0)
 
     encoder_sne_file = model_dir+'en_'+date+'_'+str(encodingN)+'_'+str(LSTMN)+'_vae.npz'
     np.savez(encoder_sne_file, encodings=encodings, encoding_errs=encodings_err, ids=sequence[:,0,-1], INPUT_FOLDER=lc_folder)
@@ -399,7 +401,7 @@ def main():
 
 
     #model.load_weights('products/models_vae/model_2023-06-02_8_128.h5')
-    #model.load_weights('products/models_vae/model.h5')
+    model.load_weights('products/models_vae/model.h5')
 
     model, history = fit_model(
         model,
@@ -418,7 +420,7 @@ def main():
     with open(os.path.join(args.outdir,'trainHistoryDict'), 'wb') as file_pi:
         pickle.dump(history.history, file_pi)
     
-    encoder, encoder_err = get_encoder(model, input_1, encoded, encoded_err)
+    encoder, encoder_err = get_encoder(model, nfilts)
 
     if args.outdir[-1] != '/':
         args.outdir += '/'
@@ -427,9 +429,9 @@ def main():
    
     print("saved model")
     
-    save_encodings_vae(model, encoder, encoder_err, seq_train, args.lcfolder, args.encodingN, args.neuronN, len(seq_train), maxlen, model_dir='encodings_train/', outdir=args.outdir)
+    save_encodings_vae(model, encoder, encoder_err, seq_train, args.lcfolder, args.encodingN, args.neuronN, len(seq_train), len(seq_train[0]), model_dir='encodings_train/', outdir=args.outdir)
     
-    save_encodings_vae(model, encoder, encoder_err, seq_test, args.lcfolder, args.encodingN, args.neuronN, len(seq_test), maxlen, model_dir='encodings_test/', outdir=args.outdir)
+    save_encodings_vae(model, encoder, encoder_err, seq_test, args.lcfolder, args.encodingN, args.neuronN, len(seq_test), len(seq_train[0]), model_dir='encodings_test/', outdir=args.outdir)
     
     print("saved encodings")
 

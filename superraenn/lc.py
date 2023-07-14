@@ -237,11 +237,20 @@ class LightCurve(object):
         Done before dense_LC so JAX can precompile the
         loss function with JIT.
         """
+        if final_length <= len(self.times):
+            print("SKIPPED TOO LONG")
+            self.times = self.times[:final_length]
+            self.mags_err = self.mags_err[:final_length]
+            self.mags = self.mags[:final_length]
+            self.filters = self.filters[:final_length]
+            self.zpt = self.zpt[:final_length]
+            self.lim_mags = self.lim_mags[:final_length]
+            return
+        
         add_len = final_length - len(self.times)
         #self.abs_mags_err = np.append(self.abs_mags_err, np.repeat(filler_err, add_len))
         self.mags_err = np.append(self.mags_err, np.repeat(filler_err, add_len))
-        if add_len == 0:
-            return
+        
         # split between the number of bands
         nfilts = len(np.unique(self.filters))
         

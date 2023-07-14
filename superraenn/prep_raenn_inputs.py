@@ -30,14 +30,17 @@ def oversample_lightcurves(
     outseq = np.zeros((num_per_lc * len(lcs), sequence_len))
     label_ints = np.zeros(num_per_lc * len(lcs))
     ct = 0
-    
+    skip_ct = 0
     for e, lightcurve in enumerate(lcs):
         if lightcurve.redshift <= 0.:
             print("BAD REDSHIFT")
-        all_idxs = np.arange(len(lightcurve.times))
-        early_idxs = all_idxs[lightcurve.times <= 0]
-        late_idxs = all_idxs[lightcurve.times >= 0]
+            
+        idxs_real = ( (lightcurve.times != -30.) & (lightcurve.times != 200.) )
+        all_idxs = np.arange(len(lightcurve.times))[idxs_real]
+        early_idxs = all_idxs[lightcurve.times[idxs_real] <= 0]
+        late_idxs = all_idxs[lightcurve.times[idxs_real] >= 0]
         
+
         # temporary solution
         for i in range(num_per_lc):
 
@@ -54,16 +57,19 @@ def oversample_lightcurves(
             start_idx = np.random.randint(0, (PAD_SIZE - n_points))
             fill_range = np.arange(start_idx, start_idx + n_points)
             rest_times = lightcurve.times[idxs] / (1. + lightcurve.redshift)
-            brightest_time = rest_times[np.argmax(lightcurve.dense_lc[idxs, 1, 0], axis=0)]
-            """
+            
+            try:
+                brightest_time = rest_times[np.argmax(lightcurve.dense_lc[idxs, 1, 0], axis=0)]
+                
             except:
-                print("SKIPPED")
                 sequence[ct, :, :] = 0
                 outseq[ct,:] = 0
                 label_ints[ct] = -1
                 ct += 1
+                skip_ct += 1
                 continue
-            """
+
+            
             rest_times -= brightest_time
             rand_z = np.random.uniform(0.001, 2.)
             
@@ -126,6 +132,7 @@ def oversample_lightcurves(
                 ct += 1
         """
     
+    print(skip_ct, ct)
     assert ct == len(sequence) # full sequence filled out
     
     # Flip because who needs negative magnitudes
@@ -206,6 +213,7 @@ def prep_input(
         total_num_test += round(num_per_class / label_cts_test[e])*  label_cts_test[e]
                                    
     seq_train = np.zeros((total_num_train, sequence_len, 2*nfilts+2))
+    print(len(seq_train))
     seq_test = np.zeros((total_num_test, sequence_len, 2*nfilts+2))
     
     outseq_train = np.zeros((total_num_train, sequence_len))
@@ -218,6 +226,8 @@ def prep_input(
     ct_test = 0
     
     for e, l in enumerate(labels_unique):
+        if l == "peculiar":
+            continue
         lc_train_class = lc_train[label_train == l]
         l_train_class = label_train[label_train == l]
         
@@ -233,8 +243,7 @@ def prep_input(
             num_train,
             sequence_len=sequence_len
         )
-        
-        print(seq_temp)
+
         
         seq_train[ct_train:(ct_train+len(seq_temp))], \
         outseq_train[ct_train:(ct_train+len(seq_temp))], \
@@ -252,9 +261,9 @@ def prep_input(
         ct_train += num_train*label_cts[e]
         ct_test += num_test*label_cts_test[e]
 
-    skip_idxs_train = np.where(np.sum(seq_train**2, axis=(1,2)) == 0)[0]
-    skip_idxs_test = np.where(np.sum(seq_test**2, axis=(1,2)) == 0)[0]
-    print(skip_idxs_train)
+    skip_idxs_train = ( np.sum(seq_train**2, axis=(1,2)) == 0 )
+    skip_idxs_test = ( np.sum(seq_test**2, axis=(1,2)) == 0 )
+    print(len(skip_idxs_train), len(seq_train))
     
     seq_train, outseq_train, l_train = seq_train[~skip_idxs_train], outseq_train[~skip_idxs_train], l_train[~skip_idxs_train]
     seq_test, outseq_test, l_test = seq_test[~skip_idxs_test], outseq_test[~skip_idxs_test], l_test[~skip_idxs_test]
