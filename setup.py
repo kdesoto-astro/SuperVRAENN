@@ -34,27 +34,27 @@ with open(os.path.join(here, 'requirements.txt')) as requirements_file:
 
 
 setup(
-    name='superraenn',
+    name='supervraenn',
     version=versioneer.get_version(),
     cmdclass=versioneer.get_cmdclass(),
     description="Python package to classify  supernovae based on optical light curves",
     long_description=readme,
-    author="V. Ashley Villar",
-    author_email='ashley.villar@gmail.com',
-    url='https://github.com/villrv/superraenn',
+    author="Kaylee de Soto",
+    author_email='kdesoto@g.harvard.edu',
+    url='https://github.com/kdesoto-psu/supervraenn',
     python_requires='>={}'.format('.'.join(str(n) for n in min_version)),
     packages=find_packages(exclude=['docs', 'tests']),
     entry_points={
         'console_scripts': [
-            'superraenn-prep = superraenn.preprocess:main',
-            'superraenn-raenn = superraenn.raenn:main',
-            'superraenn-extract = superraenn.feature_extraction:main',
-            'superraenn-classify = superraenn.classify:main'
+            'superraenn-prep = supervraenn.preprocess:main',
+            'superraenn-raenn = supervraenn.raenn:main',
+            'superraenn-extract = supervraenn.feature_extraction:main',
+            'superraenn-classify = supervraenn.classify:main'
         ],
     },
     include_package_data=True,
     package_data={
-        'superraenn': [
+        'supervraenn': [
             # When adding files here, remember to update MANIFEST.in as well,
             # or else they will not be included in the distribution on PyPI!
             # 'path/to/data_file',
