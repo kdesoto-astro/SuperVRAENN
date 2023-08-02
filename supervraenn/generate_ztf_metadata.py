@@ -4,14 +4,13 @@ from dustmaps.sfd import SFDQuery
 from astropy.coordinates import SkyCoord
 import zipfile
 from antares_client.search import get_by_ztf_object_id
-from superraenn.lc import LightCurve
-from superraenn.preprocess import save_lcs
+from supervraenn.lc import LightCurve
+from supervraenn.preprocess import save_lcs
 import gc
-import os, psutil
-from pympler import tracker, summary, muppy
+import os
 import time
 
-CSV_FILES = ["training_set_combined_05_09_2023.csv"]
+CSV_FILES = ["../tests/data/mini_ztf_training_set.csv"]
 OUTPUT_DAT = "../tests/data/ztf_metadata.dat"
 OUTPUT_DIR = "../tests/data/ztf_LCs"
 LIM_MAG_R = 20.6 #https://iopscience.iop.org/article/10.1088/1538-3873/aaecbe#:~:text=Median%20five%2Dsigma%20model%20limiting,and%2019.9%20in%20i%2Dband.
@@ -39,7 +38,6 @@ def save_LCs(lc_list, labels, max_t0s, output_dir, ct):
     #print(len(max_t0s), len(labels), len(lc_list))
     assert len(max_t0s) == len(lc_list)
     assert len(max_t0s) == len(labels)
-    #tr = tracker.SummaryTracker()
 
     # Update the LC objects with info from the metatable
     filt_dict = {'g': 0, 'r': 1}
@@ -54,9 +52,6 @@ def save_LCs(lc_list, labels, max_t0s, output_dir, ct):
     gc.collect()
     skip_ct = 0
     for i, my_lc in enumerate(lc_list):
-        #gc.collect()
-            #print(i)
-            #print('RAM memory % used:', psutil.virtual_memory()[2])
         try:
             my_lc.get_mags()
             my_lc.sort_lc()
@@ -113,7 +108,11 @@ def fix_metatable(old_metatable, lc_prefix, new_metatable):
     while True:
         try:
             lc_file = lc_prefix + "_%d.npz" % ct
-            lightcurves = np.load(lc_file, allow_pickle=True)['lcs']
+            print(lc_file)
+            lightcurve_f = np.load(lc_file, allow_pickle=True)
+            for k in lightcurve_f.files:
+                print(k)
+            lightcurves = lightcurve_f['lcs']
             print(len(lightcurves))
             for lc in lightcurves:
                 lc_list.append(lc.name)
@@ -137,6 +136,7 @@ def fix_metatable(old_metatable, lc_prefix, new_metatable):
         "SNIa-91bg-like": "SNIa",
         "SLSN-II": "SNIIn",
     }
+    print(lc_list)
     modified_rows = []
     with open(old_metatable, "r") as mt:
         csvreader = csv.reader(mt, delimiter=" ")
@@ -144,7 +144,7 @@ def fix_metatable(old_metatable, lc_prefix, new_metatable):
         for row in csvreader:
             #print(row)
             if row[0] not in lc_list:
-                print("skipped2")
+                #print("skipped2")
                 continue
             if len(row) == 5:
                 merged_type = row[2]
@@ -244,12 +244,14 @@ def generate_files_from_antares():
     ct = 0
     #ct = 9
     #new_names = False
+    """
     expected_names = []
     with open("ztf_metadata_backup.dat", "r") as bck:
         csvreader = csv.reader(bck, delimiter=" ")
         for row in csvreader:
             expected_names.append(row[0])
-    print(expected_names[:10])
+    """
+    #print(expected_names[:10])
     for csv_file in CSV_FILES:
         with open(csv_file, "r") as mc:
             csvreader = csv.reader(mc, delimiter=",", skipinitialspace=True)

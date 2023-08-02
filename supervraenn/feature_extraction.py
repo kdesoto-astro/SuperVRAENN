@@ -1,10 +1,10 @@
 import numpy as np
-from .lc import LightCurve
-from .raenn import prep_input, get_decoder, get_decodings, get_encoder
+from supervraenn.lc import LightCurve
+from supervraenn.raenn import prep_input, get_decoder, get_decodings, get_encoder
 import argparse
 from keras.models import model_from_json, Model, load_model
 from keras.layers import Input
-from .custom_nn_layers import Sampling, SimilarityLossLayer, ReconstructionLoss, ConsistencyLossLayer, SpecLossLayer
+from supervraenn.custom_nn_layers import Sampling, SimilarityLossLayer, ReconstructionLoss, ConsistencyLossLayer, SpecLossLayer
 import datetime
 import os, glob
 
