@@ -14,3 +14,4 @@ jaxlib
 dustmaps
 jaxopt
 tensorflow
+pydot

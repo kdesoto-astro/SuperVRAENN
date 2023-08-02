@@ -27,7 +27,10 @@ def replace_LCs(input_lc_file, output_dir, ct):
 
     my_lcs = []
 
-    for my_lc in lightcurves[:10]:
+    sequence_len = 100
+    
+    for my_lc in lightcurves:
+        my_lc.pad_LC(sequence_len)
         my_lc.make_dense_LC()
         my_lcs.append(my_lc)
             

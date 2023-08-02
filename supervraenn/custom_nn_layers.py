@@ -105,7 +105,7 @@ class Sampling(Layer):
             #Add regularizer loss
             kl_loss = - 0.5 * tf.reduce_mean(1 + z_log_var - tf.math.square(z_mean) - tf.math.exp(z_log_var))
             self.add_metric(kl_loss, "KL_loss")
-            #self.add_loss(self.beta * kl_loss)
+            self.add_loss(self.beta * kl_loss)
             self.add_metric(self.beta, "beta")
         
         return samples

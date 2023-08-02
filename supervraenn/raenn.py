@@ -376,7 +376,7 @@ def main():
     
     seq_train, outseq_train, label_int_train, \
     seq_test, outseq_test, label_int_test, \
-    bandmin, bandmax = prep_input(args.lcfolder, obj_type, 10000, save=True, outdir=args.outdir)
+    bandmin, bandmax = prep_input(args.lcfolder, obj_type, OVERSAMPLE_PER_CLASS, save=True, outdir=args.outdir)
 
     nfilts = int((seq_train.shape[-1] - 2) / 2)
 
@@ -401,7 +401,7 @@ def main():
 
 
     #model.load_weights('products/models_vae/model_2023-06-02_8_128.h5')
-    model.load_weights('products/models_vae/model.h5')
+    #model.load_weights('products/models_vae/model.h5')
 
     model, history = fit_model(
         model,
@@ -415,7 +415,8 @@ def main():
         args.n_epoch
     )
     
-    plot_model(model, to_file='figs/model.png')
+    os.makedirs('products/figs/', exist_ok=True)
+    plot_model(model, to_file='products/figs/model.png')
     
     with open(os.path.join(args.outdir,'trainHistoryDict'), 'wb') as file_pi:
         pickle.dump(history.history, file_pi)
