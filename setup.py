@@ -46,10 +46,10 @@ setup(
     packages=find_packages(exclude=['docs', 'tests']),
     entry_points={
         'console_scripts': [
-            'superraenn-prep = supervraenn.preprocess:main',
-            'superraenn-raenn = supervraenn.raenn:main',
-            'superraenn-extract = supervraenn.feature_extraction:main',
-            'superraenn-classify = supervraenn.classify:main'
+            'supervraenn-prep = supervraenn.preprocess:main',
+            'supervraenn-raenn = supervraenn.raenn:main',
+            'supervraenn-extract = supervraenn.feature_extraction:main',
+            'supervraenn-classify = supervraenn.classify:main'
         ],
     },
     include_package_data=True,
